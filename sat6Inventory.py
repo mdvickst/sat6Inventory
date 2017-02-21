@@ -18,6 +18,7 @@
 
 import json
 import getpass
+import os
 import urllib2
 import urllib
 import base64
@@ -25,6 +26,48 @@ import sys
 import ssl
 import csv
 from optparse import OptionParser
+
+default_login     = None
+default_password  = None
+default_satellite = None
+try:
+    import yaml
+    try:
+        _hammer_config = yaml.safe_load(open(os.path.expanduser(' /etc/hammer/cli.modules.d/foreman.yml'), 'r').read())
+        try:
+            default_login = _hammer_config[':foreman'][':username']
+        except KeyError:
+            pass
+        try:
+            default_password = _hammer_config[':foreman'][':password']
+        except KeyError:
+            pass
+        try:
+            default_satellite = _hammer_config[':foreman'][':host'].split('/')[2]
+        except KeyError:
+            pass
+    except (IOError, yaml.parser.ParserError):
+        pass
+    try:
+        _hammer_config = yaml.safe_load(open(os.path.expanduser('~/.hammer/cli_config.yml'), 'r').read())
+        try:
+            default_login = _hammer_config[':foreman'][':username']
+        except KeyError:
+            pass
+        try:
+            default_password = _hammer_config[':foreman'][':password']
+        except KeyError:
+            pass
+        try:
+            default_satellite = _hammer_config[':foreman'][':host'].split('/')[2]
+        except KeyError:
+            pass
+    except (IOError, yaml.parser.ParserError):
+        pass
+except ImportError:
+    print('Could not import YAML module to parse hammer configuration file. verify that it is installed properly')
+    print('Defaulting to prompting for username/password')
+    pass
 
 _sysdata_mapping = {
     'uuid': 'uuid',
@@ -133,14 +176,14 @@ _format_columns_mapping = {
 
 
 parser = OptionParser()
-parser.add_option("-l", "--login", dest="login", help="Login user", metavar="LOGIN")
-parser.add_option("-p", "--password", dest="password", help="Password for specified user. Will prompt if omitted", metavar="PASSWORD")
-parser.add_option("-s", "--satellite", dest="satellite", help="FQDN of Satellite - omit https://", metavar="SATELLITE")
+parser.add_option("-l", "--login", dest="login", help="Login user", metavar="LOGIN", default=default_login)
+parser.add_option("-p", "--password", dest="password", help="Password for specified user. Will prompt if omitted", metavar="PASSWORD", default=default_password)
+parser.add_option("-s", "--satellite", dest="satellite", help="FQDN of Satellite - omit https://", metavar="SATELLITE", default=default_satellite)
 parser.add_option("-o", "--orgid",  dest="orgid", help="Label of the Organization in Satellite that is to be queried", metavar="ORGID")
 parser.add_option("-v", "--verbose", dest="verbose", action="store_true", help="Verbose output")
 parser.add_option("-d", "--debug", dest="debug", action="store_true", help="Debugging output (debug output enables verbose)")
 parser.add_option("-c", "--columns", dest="columns", help="coma separated list of columns to add to the output")
-parser.add_option("-f", "--format", dest="format", help="use an predefined output format", choices=_format_columns_mapping.keys())
+parser.add_option("-f", "--format", dest="format", help="use an predefined output format (available formats: %s)" % ", ".join(_format_columns_mapping.keys()),choices=_format_columns_mapping.keys())
 parser.add_option("-S", "--search", dest="search", help="limit report to machines matching this search")
 (options, args) = parser.parse_args()
 
@@ -198,6 +241,28 @@ else:
 
 if hasattr(ssl, '_create_unverified_context'):
     ssl._create_default_https_context = ssl._create_unverified_context
+
+try:
+    url = "https://" + satellite + "/api/status"
+    request = urllib2.Request(url)
+    if VERBOSE:
+        print "=" * 80
+        print "[%sVERBOSE%s] Connecting to -> %s " % (error_colors.OKGREEN, error_colors.ENDC, url)
+    base64string = base64.encodestring('%s:%s' % (login, password)).strip()
+    request.add_header("Authorization", "Basic %s" % base64string)
+    result = urllib2.urlopen(request)
+    jsonresult = json.load(result)
+    api_version = jsonresult['api_version']
+    if VERBOSE:
+        print "=" * 80
+        print "[%sVERBOSE%s] API Version -> %s " % (error_colors.OKGREEN, error_colors.ENDC, api_version)
+except urllib2.URLError, e:
+    print "Error: cannot connect to the API: %s" % (e)
+    print "Check your URL & try to login using the same user/pass via the WebUI and check the error!"
+    sys.exit(1)
+except Exception, e:
+    print "FATAL Error - %s" % (e)
+    sys.exit(2)
 
 systemdata = []
 
@@ -287,9 +352,11 @@ def report_sysdata():
 
 for system in systemdata:
     sysdetailedurl = "https://" + satellite + "/katello/api/v2/systems/" + system["uuid"] + "?fields=full"
-    subdetailedurl = "https://" + satellite + "/katello/api/v2/systems/" + system["uuid"] + "/subscriptions"
     hostdetailedurl = "https://" + satellite + "/api/v2/hosts/" + system["name"] + "/facts?per_page=99999"
-
+    if api_version == 2:
+        subdetailedurl = "https://" + satellite + "/api/v2/hosts/" + str(system["host_id"]) + "/subscriptions"
+    else:
+        subdetailedurl = "https://" + satellite + "/katello/api/v2/systems/" + system["uuid"] + "/subscriptions"
     if VERBOSE:
         print "=" * 80
         print "[%sVERBOSE%s] Connecting to -> %s " % (error_colors.OKGREEN, error_colors.ENDC, sysdetailedurl)
@@ -338,7 +405,7 @@ for system in systemdata:
         print "Error - %s" % (e)
 
     host_info = {}
-    fake = ['software_channel', 'configuration_channel', 'system_group', 'amount', 'entitlement', 'entitlements', 'organization', 'account_number', 'contract_number', 'start_date', 'end_date', 'hypervisor', 'virtual', 'compliant']
+    fake = ['software_channel', 'configuration_channel', 'system_group', 'amount', 'entitlement', 'entitlements', 'organization', 'account_number', 'contract_number', 'start_date', 'end_date', 'hypervisor', 'virtual', 'compliant', 'ip_addresses', 'ipv6_addresses']
     for key in _sysdata_mapping.keys() + _sysdata_facts_mapping.keys() + _sysdata_virtual_host_mapping.keys() + _sysdata_errata_mapping.keys() + _facts_mapping.keys() + fake:
         host_info[key] = 'unknown'
 
@@ -347,7 +414,11 @@ for system in systemdata:
         for entitlement in subdata["results"]:
             # Get the Amount of subs
             subName = entitlement['product_name']
-            host_info['amount'] = entitlement['amount']
+            if api_version == 2:
+              host_info['amount'] = entitlement['quantity_consumed']
+            else:
+              host_info['amount'] = entitlement['amount']
+            #host_info['amount'] = entitlement['amount']
             host_info['entitlement'] = entitlement['product_name']
             host_info['entitlements'] = entitlement['product_name']
             host_info['organization'] = orgid
@@ -368,23 +439,34 @@ for system in systemdata:
 
             report_sysdata()
 
-        if not subName in sub_summary:
-            sub_summary[subName] = {}
-        if virtual in sub_summary[subName]:
-            sub_summary[subName][virtual] += host_info['amount']
-        else:
-            sub_summary[subName][virtual] = host_info['amount']
+            if not subName in sub_summary:
+                sub_summary[subName] = {}
+            if virtual in sub_summary[subName]:
+                if host_info['amount'] == 'unknown':
+                    sub_summary[subName][virtual] += 0
+                else:
+                    sub_summary[subName][virtual] += int(host_info['amount'])
+            else:
+                sub_summary[subName][virtual] = host_info['amount']
+
+            if VERBOSE:
+                print json.dumps(host_info, sort_keys = False, indent = 2)
+                print "=" * 80
+                print
+
+            row = [host_info[x] for x in columns]
+            csv_writer_subs.writerow(row)
     except NameError:
         # if the server doesn't have a subscription still report sysdata
         report_sysdata()
 
-    if VERBOSE:
-        print json.dumps(host_info, sort_keys = False, indent = 2)
-        print "=" * 80
-        print
+        if VERBOSE:
+            print json.dumps(host_info, sort_keys = False, indent = 2)
+            print "=" * 80
+            print
 
-    row = [host_info[x] for x in columns]
-    csv_writer_subs.writerow(row)
+        row = [host_info[x] for x in columns]
+        csv_writer_subs.writerow(row)
 
 print "\nSubscription Usage Summary:"
 for subscription in sub_summary:
